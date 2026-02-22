@@ -3,6 +3,7 @@ package discovery
 
 import (
 	"cmp"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,15 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 )
+
+// FileNotFoundError is returned when an explicit (non-glob) path does not exist.
+type FileNotFoundError struct {
+	Path string
+}
+
+func (e *FileNotFoundError) Error() string {
+	return "file not found: " + e.Path
+}
 
 // DiscoveredFile represents a Dockerfile discovered during file discovery.
 type DiscoveredFile struct {
@@ -94,7 +104,7 @@ func Discover(inputs []string, opts Options) ([]DiscoveredFile, error) {
 func discoverInput(input string, opts Options, seen map[string]bool) ([]DiscoveredFile, error) {
 	// Check if the input contains glob characters. If so, treat it as a glob pattern
 	// without trying os.Stat (which fails on Windows with glob chars like *).
-	if containsGlobChars(input) {
+	if ContainsGlobChars(input) {
 		return globMatches(input, opts, seen)
 	}
 
@@ -107,19 +117,20 @@ func discoverInput(input string, opts Options, seen map[string]bool) ([]Discover
 		return discoverFile(input, opts, seen)
 	}
 
-	// Not a literal path, treat as glob pattern (for cases like non-existent patterns)
-	if !os.IsNotExist(err) {
+	// Non-glob literal path that doesn't exist — return a specific error
+	// so the caller can distinguish "file not found" from other failures.
+	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 
-	return globMatches(input, opts, seen)
+	return nil, &FileNotFoundError{Path: input}
 }
 
-// containsGlobChars returns true if the path contains glob special characters.
-func containsGlobChars(path string) bool {
+// ContainsGlobChars reports whether the path contains glob special characters.
+func ContainsGlobChars(path string) bool {
 	for _, c := range path {
 		switch c {
-		case '*', '?', '[', ']':
+		case '*', '?', '[', ']', '{', '}':
 			return true
 		}
 	}

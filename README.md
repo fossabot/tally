@@ -59,7 +59,7 @@ tally integrates rules from multiple sources:
 | Source | Rules | Description |
 |--------|-------|-------------|
 | **[BuildKit](https://docs.docker.com/reference/build-checks/)** | 22/22 rules | Docker's official Dockerfile checks (captured + reimplemented) |
-| **tally** | 14 rules | Custom rules including secret detection with [gitleaks](https://github.com/gitleaks/gitleaks) |
+| **tally** | 15 rules | Custom rules including secret detection with [gitleaks](https://github.com/gitleaks/gitleaks) |
 | **[Hadolint](https://github.com/hadolint/hadolint)** | 37 rules | Hadolint-compatible Dockerfile rules (expanding) |
 <!-- END RULES_TABLE -->
 
@@ -348,11 +348,7 @@ Features:
 
 ### Exit Codes
 
-| Code | Meaning                                           |
-| ---- | ------------------------------------------------- |
-| `0`  | No violations (or below `--fail-level` threshold) |
-| `1`  | Violations found at or above `--fail-level`       |
-| `2`  | Parse or configuration error                      |
+See [Exit Codes](docs/guide/exit-codes.md) for the full reference.
 
 ### Fail Level
 

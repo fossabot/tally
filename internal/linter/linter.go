@@ -49,6 +49,11 @@ type Input struct {
 	// Config is the resolved configuration. If nil, LintFile loads from FilePath.
 	Config *config.Config
 
+	// ParseResult is a pre-parsed Dockerfile result. If non-nil, LintFile
+	// reuses it instead of parsing again. This avoids double-parsing when
+	// the caller has already parsed for syntax checks.
+	ParseResult *dockerfile.ParseResult
+
 	// BuildContext provides context-aware checks (e.g. .dockerignore).
 	// If nil, context-aware checks are skipped.
 	BuildContext rules.BuildContext
@@ -75,15 +80,19 @@ type Result struct {
 
 // LintFile runs the full lint pipeline for one file.
 // It returns raw violations before processor filtering.
+//
+// Content resolution order:
+//  1. input.Content — used as-is when provided.
+//  2. input.ParseResult.Source — used when a pre-parsed result is provided
+//     without Content, keeping sourcemap.New, directive.Parse, and
+//     semantic.NewBuilder in sync with the bytes that were actually parsed.
+//  3. os.ReadFile(input.FilePath) — last resort when neither is set.
+//
+// ParseResult resolution follows the same priority: input.ParseResult is
+// reused directly (avoiding a second parse); otherwise the file is parsed
+// from the resolved content.
 func LintFile(input Input) (*Result, error) {
 	content := input.Content
-	if content == nil {
-		var err error
-		content, err = os.ReadFile(input.FilePath)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	cfg := input.Config
 	if cfg == nil {
@@ -94,12 +103,29 @@ func LintFile(input Input) (*Result, error) {
 		}
 	}
 
-	parseResult, err := dockerfile.Parse(bytes.NewReader(content), cfg)
-	if err != nil {
-		return nil, err
+	var parseResult *dockerfile.ParseResult
+	if input.ParseResult != nil {
+		parseResult = input.ParseResult
+		// Populate content from the pre-parsed result so that sourcemap.New,
+		// directive.Parse, and semantic.NewBuilder all operate on the same
+		// bytes that were parsed — not a separate re-read from disk.
+		if content == nil {
+			content = parseResult.Source
+		}
+	} else {
+		if content == nil {
+			var err error
+			content, err = os.ReadFile(input.FilePath)
+			if err != nil {
+				return nil, err
+			}
+		}
+		var parseErr error
+		parseResult, parseErr = dockerfile.Parse(bytes.NewReader(content), cfg)
+		if parseErr != nil {
+			return nil, parseErr
+		}
 	}
-	// Ensure Source is set (Parse reads from a reader, source is captured internally).
-	// If the caller passed Content, the parse result's Source should already match.
 
 	sm := sourcemap.New(content)
 	directiveResult := directive.Parse(sm, nil)
