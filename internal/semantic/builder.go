@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/moby/buildkit/frontend/dockerfile/command"
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
 	dfshell "github.com/moby/buildkit/frontend/dockerfile/shell"
@@ -750,10 +751,10 @@ func (b *Builder) checkDL3061InstructionOrder() {
 		if node == nil {
 			continue
 		}
-		if strings.EqualFold(node.Value, "FROM") {
+		if strings.EqualFold(node.Value, command.From) {
 			return
 		}
-		if strings.EqualFold(node.Value, "ARG") {
+		if strings.EqualFold(node.Value, command.Arg) {
 			continue
 		}
 
@@ -768,6 +769,7 @@ func (b *Builder) checkDL3061InstructionOrder() {
 			"Invalid instruction order. Dockerfile must begin with `FROM`, `ARG` or comment.",
 			rules.HadolintDocURL("DL3061"),
 		))
+		return // Report only the first offending instruction.
 	}
 }
 
@@ -783,7 +785,7 @@ func (b *Builder) checkDL3043ForbiddenOnbuildTriggers() {
 
 	nodes := topLevelInstructionNodes(b.parseResult.AST.AST)
 	for _, node := range nodes {
-		if node == nil || !strings.EqualFold(node.Value, "ONBUILD") {
+		if node == nil || !strings.EqualFold(node.Value, command.Onbuild) {
 			continue
 		}
 
@@ -792,9 +794,9 @@ func (b *Builder) checkDL3043ForbiddenOnbuildTriggers() {
 			continue
 		}
 
-		if strings.EqualFold(trigger, "ONBUILD") ||
-			strings.EqualFold(trigger, "FROM") ||
-			strings.EqualFold(trigger, "MAINTAINER") {
+		if strings.EqualFold(trigger, command.Onbuild) ||
+			strings.EqualFold(trigger, command.From) ||
+			strings.EqualFold(trigger, command.Maintainer) {
 			var loc parser.Range
 			if ranges := node.Location(); len(ranges) > 0 {
 				loc = ranges[0]

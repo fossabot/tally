@@ -35,16 +35,32 @@ func (e *CheckError) Error() string {
 	return fmt.Sprintf("%d syntax errors found", n)
 }
 
-// Check runs all syntax checks on a parsed AST.
+// RuleCodes returns the rule codes for all syntax-level checks.
+// These checks are not registered in the rules.Registry since they run
+// before the lint pipeline, but they count toward the tally rule total.
+func RuleCodes() []string {
+	return []string{
+		"tally/unknown-instruction",
+		"tally/require-stages",
+		"tally/syntax-directive-typo",
+	}
+}
+
+// Check runs syntax checks on a parsed AST in priority order and returns
+// errors from the first check that fires. This is fail-fast: once a check
+// produces errors, later checks are skipped.
 // Returns nil if no issues are found.
 func Check(file string, ast *parser.Result, source []byte) []Error {
-	errs := make([]Error, 0, 4) //nolint:mnd // small pre-alloc for typical case
-	errs = append(errs, checkUnknownInstructions(file, ast)...)
-	errs = append(errs, checkSyntaxDirective(file, source)...)
-	if len(errs) == 0 {
-		return nil
+	if errs := checkUnknownInstructions(file, ast); len(errs) > 0 {
+		return errs
 	}
-	return errs
+	if errs := checkRequireStages(file, ast); len(errs) > 0 {
+		return errs
+	}
+	if errs := checkSyntaxDirective(file, source); len(errs) > 0 {
+		return errs
+	}
+	return nil
 }
 
 // ClosestInstruction returns the closest valid Dockerfile instruction to input
