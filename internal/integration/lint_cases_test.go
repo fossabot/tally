@@ -226,6 +226,25 @@ func lintCases(t *testing.T) []lintCase {
 			wantExit: 1,
 		},
 
+		// Invalid JSON exec-form detection
+		{
+			name:     "invalid-json-form",
+			dir:      "invalid-json-form",
+			args:     append([]string{"--format", "json"}, mustSelectRules("tally/invalid-json-form")...),
+			wantExit: 1,
+		},
+		// Cross-rule: invalid JSON triggers both tally/invalid-json-form and
+		// buildkit/JSONArgsRecommended (BuildKit falls back to shell-form).
+		{
+			name: "invalid-json-form-cross-rules",
+			dir:  "invalid-json-form-cross-rules",
+			args: append(
+				[]string{"--format", "json"},
+				mustSelectRules("tally/invalid-json-form", "buildkit/JSONArgsRecommended")...,
+			),
+			wantExit: 1,
+		},
+
 		// Inline directive tests (need specific rules to test against)
 		{
 			name: "inline-ignore-single",
