@@ -1,6 +1,7 @@
 # tally
 
 [![codecov](https://codecov.io/gh/wharflab/tally/graph/badge.svg?token=J3vK0hyLkf)](https://codecov.io/gh/wharflab/tally)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fwharflab%2Ftally.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fwharflab%2Ftally?ref=badge_shield)
 
 tally is a production-grade **Dockerfile/Containerfile linter + formatter** that keeps build files clean, modern, and consistent.
 
@@ -416,3 +417,6 @@ See [CLAUDE.md](CLAUDE.md) for development guidelines.
 ## License
 
 Apache-2.0
+
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fwharflab%2Ftally.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fwharflab%2Ftally?ref=badge_large)
