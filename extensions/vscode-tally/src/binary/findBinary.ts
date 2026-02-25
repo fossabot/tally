@@ -1,5 +1,3 @@
-import type * as vscode from "vscode";
-
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -8,6 +6,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 
 import * as semver from "semver";
+import type * as vscode from "vscode";
 
 import { type BinaryResolutionSettings } from "../config/vscodeConfig";
 import { validateUserSuppliedPath } from "./pathValidator";
@@ -29,6 +28,8 @@ export interface ResolvedBinary {
   args: string[];
   key: string;
   source: BinarySource;
+  executablePath: string;
+  version?: string;
 }
 
 export interface FindTallyBinaryInput {
@@ -57,7 +58,7 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
       continue;
     }
     if (await isExecutableFile(candidate)) {
-      return directBinary(candidate, "explicitPath");
+      return directBinary(candidate, "explicitPath", await readBinaryVersion(candidate));
     }
   }
 
@@ -65,7 +66,7 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
   if (settings.importStrategy === "useBundled") {
     const bundled = bundledBinaryPath(extensionContext);
     if (await isExecutableFile(bundled)) {
-      return directBinary(bundled, "bundled");
+      return directBinary(bundled, "bundled", await readBinaryVersion(bundled));
     }
     throw new Error("tally.importStrategy is useBundled, but bundled binary is missing");
   }
@@ -74,7 +75,7 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
   if (!isTrusted) {
     const bundled = bundledBinaryPath(extensionContext);
     if (await isExecutableFile(bundled)) {
-      return directBinary(bundled, "bundled");
+      return directBinary(bundled, "bundled", await readBinaryVersion(bundled));
     }
     throw new Error("workspace is untrusted and no bundled tally binary is available");
   }
@@ -87,7 +88,11 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
         if (minVersion && !(await isCompatibleBinary(candidate, minVersion, output))) {
           continue;
         }
-        const resolved = windowsCmdShimAwareBinary(candidate, "workspaceNpm");
+        const resolved = windowsCmdShimAwareBinary(
+          candidate,
+          "workspaceNpm",
+          await readBinaryVersion(candidate),
+        );
         if (resolved) {
           return resolved;
         }
@@ -104,7 +109,7 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
           if (minVersion && !(await isCompatibleBinary(candidate, minVersion, output))) {
             continue;
           }
-          return directBinary(candidate, "pythonEnvExt");
+          return directBinary(candidate, "pythonEnvExt", await readBinaryVersion(candidate));
         }
       } catch {
         // resolver failed for this folder; continue fallback chain
@@ -120,7 +125,7 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
         if (minVersion && !(await isCompatibleBinary(candidate, minVersion, output))) {
           continue;
         }
-        return directBinary(candidate, "workspaceVenv");
+        return directBinary(candidate, "workspaceVenv", await readBinaryVersion(candidate));
       }
     }
   }
@@ -128,13 +133,13 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
   // 6) PATH
   const onPath = await findOnPATH("tally");
   if (onPath && (!minVersion || (await isCompatibleBinary(onPath, minVersion, output)))) {
-    return directBinary(onPath, "envPath");
+    return directBinary(onPath, "envPath", await readBinaryVersion(onPath));
   }
 
   // 7) Bundled fallback
   const bundled = bundledBinaryPath(extensionContext);
   if (await isExecutableFile(bundled)) {
-    return directBinary(bundled, "bundled");
+    return directBinary(bundled, "bundled", await readBinaryVersion(bundled));
   }
 
   throw new Error(
@@ -142,26 +147,33 @@ export async function findTallyBinary(input: FindTallyBinaryInput): Promise<Reso
   );
 }
 
-function directBinary(executablePath: string, source: BinarySource): ResolvedBinary {
+function directBinary(
+  executablePath: string,
+  source: BinarySource,
+  version?: string,
+): ResolvedBinary {
   return {
     command: executablePath,
     args: ["lsp", "--stdio"],
     key: `direct:${executablePath}`,
     source,
+    executablePath,
+    version,
   };
 }
 
 function windowsCmdShimAwareBinary(
   executablePath: string,
   source: BinarySource,
+  version?: string,
 ): ResolvedBinary | undefined {
   if (process.platform !== "win32") {
-    return directBinary(executablePath, source);
+    return directBinary(executablePath, source, version);
   }
 
   const lower = executablePath.toLowerCase();
   if (!lower.endsWith(".cmd") && !lower.endsWith(".bat")) {
-    return directBinary(executablePath, source);
+    return directBinary(executablePath, source, version);
   }
 
   const validation = validateUserSuppliedPath(executablePath);
@@ -176,6 +188,8 @@ function windowsCmdShimAwareBinary(
     args: ["/d", "/s", "/c", commandLine],
     key: `cmd:${executablePath}`,
     source,
+    executablePath,
+    version,
   };
 }
 
@@ -204,12 +218,7 @@ async function isCompatibleBinary(
   output?: vscode.OutputChannel,
 ): Promise<boolean> {
   try {
-    const { stdout } = await execVersionCommand(binaryPath);
-    const info: unknown = JSON.parse(stdout);
-    const candidateVersion =
-      info && typeof info === "object" && "version" in info && typeof info.version === "string"
-        ? info.version
-        : undefined;
+    const candidateVersion = await readBinaryVersion(binaryPath);
     if (!candidateVersion || !semver.valid(candidateVersion)) {
       output?.appendLine(`[tally] skipping ${binaryPath}: unable to determine version`);
       return false;
@@ -226,6 +235,20 @@ async function isCompatibleBinary(
       `[tally] skipping ${binaryPath}: version check failed: ${e instanceof Error ? e.message : String(e)}`,
     );
     return false;
+  }
+}
+
+async function readBinaryVersion(binaryPath: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execVersionCommand(binaryPath);
+    const info: unknown = JSON.parse(stdout);
+    const candidateVersion =
+      info && typeof info === "object" && "version" in info && typeof info.version === "string"
+        ? info.version
+        : undefined;
+    return candidateVersion?.trim() ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 

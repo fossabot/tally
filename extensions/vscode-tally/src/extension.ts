@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { State } from "vscode-languageclient/node";
 
 import { findTallyBinary } from "./binary/findBinary";
 import { findTallyViaPythonEnvs, getPythonEnvApi } from "./binary/pythonEnvs";
@@ -7,11 +8,159 @@ import { TallyLanguageClient } from "./lsp/client";
 
 let client: TallyLanguageClient | undefined;
 let starting: Promise<void> | undefined;
+let stopExpected = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const output = vscode.window.createOutputChannel("Tally");
+  await vscode.commands.executeCommand("setContext", "tally.serverRunning", false);
+
+  const output = vscode.window.createOutputChannel("Tally", { log: true });
+  const traceOutput = vscode.window.createOutputChannel("Tally (LSP)", { log: true });
   const configService = new ConfigService();
-  context.subscriptions.push(output, configService);
+  context.subscriptions.push(output, traceOutput, configService);
+
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBar.command = "tally.showOutput";
+  statusBar.show();
+  context.subscriptions.push(statusBar);
+
+  const languageStatus = vscode.languages.createLanguageStatusItem("tally.server", "dockerfile");
+  languageStatus.name = "Tally Language Server";
+  context.subscriptions.push(languageStatus);
+
+  let serverStopNoticeInFlight = false;
+  let stateSubscription: vscode.Disposable | undefined;
+  let watchdogSubscription: vscode.Disposable | undefined;
+
+  function applyServerStateUi(state: "disabled" | "starting" | "running" | "stopped"): void {
+    if (state === "disabled") {
+      statusBar.text = "$(circle-slash) tally";
+      statusBar.tooltip = "Tally language server is disabled";
+      statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      languageStatus.text = "tally disabled";
+      languageStatus.detail = "Enable `tally.enable` to start the language server.";
+      languageStatus.severity = vscode.LanguageStatusSeverity.Information;
+      return;
+    }
+    if (state === "starting") {
+      statusBar.text = "$(sync~spin) tally";
+      statusBar.tooltip = "Tally language server is starting";
+      statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      languageStatus.text = "tally starting";
+      languageStatus.detail = "Tally language server is starting.";
+      languageStatus.severity = vscode.LanguageStatusSeverity.Information;
+      return;
+    }
+    if (state === "running") {
+      statusBar.text = "$(check) tally";
+      statusBar.tooltip = "Tally language server is running";
+      statusBar.backgroundColor = undefined;
+      languageStatus.severity = vscode.LanguageStatusSeverity.Information;
+      return;
+    }
+    statusBar.text = "$(error) tally";
+    statusBar.tooltip = "Tally language server is stopped";
+    statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
+    languageStatus.severity = vscode.LanguageStatusSeverity.Error;
+  }
+
+  function updateLanguageStatusForClient(current?: TallyLanguageClient): void {
+    if (!current) {
+      languageStatus.text = "tally unavailable";
+      languageStatus.detail = "No Tally language server process is active.";
+      languageStatus.severity = vscode.LanguageStatusSeverity.Warning;
+      return;
+    }
+
+    const version = current.serverVersion() ?? "unknown";
+    languageStatus.text = `tally ${version}`;
+    languageStatus.detail = `source: ${current.serverSource()} • executable: ${current.executablePath()}`;
+    languageStatus.severity = vscode.LanguageStatusSeverity.Information;
+  }
+
+  async function promptServerStopped(message: string): Promise<void> {
+    if (serverStopNoticeInFlight) {
+      return;
+    }
+    serverStopNoticeInFlight = true;
+    try {
+      const action = await vscode.window.showErrorMessage(
+        `Tally: ${message}`,
+        "Restart Server",
+        "Show Output",
+        "Show LSP Trace",
+      );
+      if (action === "Restart Server") {
+        void startOrRestart("crash recovery");
+      } else if (action === "Show Output") {
+        output.show(true);
+      } else if (action === "Show LSP Trace") {
+        traceOutput.show(true);
+      }
+    } finally {
+      serverStopNoticeInFlight = false;
+    }
+  }
+
+  function detachClientObservers(): void {
+    stateSubscription?.dispose();
+    stateSubscription = undefined;
+    watchdogSubscription?.dispose();
+    watchdogSubscription = undefined;
+  }
+
+  function attachClientObservers(current: TallyLanguageClient): void {
+    detachClientObservers();
+
+    watchdogSubscription = current.onWatchdogStop((message) => {
+      if (current !== client) {
+        return;
+      }
+      output.appendLine(`[tally] ${message}`);
+      void promptServerStopped(message);
+    });
+
+    stateSubscription = current.onDidChangeState(({ oldState, newState }) => {
+      if (current !== client) {
+        return;
+      }
+      output.appendLine(
+        `[tally] language client state: ${stateLabel(oldState)} -> ${stateLabel(newState)}`,
+      );
+
+      if (newState === State.Running) {
+        void vscode.commands.executeCommand("setContext", "tally.serverRunning", true);
+        applyServerStateUi("running");
+        updateLanguageStatusForClient(current);
+        return;
+      }
+
+      if (newState === State.Starting) {
+        void vscode.commands.executeCommand("setContext", "tally.serverRunning", false);
+        applyServerStateUi("starting");
+        return;
+      }
+
+      void vscode.commands.executeCommand("setContext", "tally.serverRunning", false);
+      applyServerStateUi(configService.snapshot().global.enable ? "stopped" : "disabled");
+
+      if (stopExpected || !configService.snapshot().global.enable) {
+        return;
+      }
+
+      setTimeout(() => {
+        if (current !== client || stopExpected) {
+          return;
+        }
+        if (current.state() !== State.Stopped || !configService.snapshot().global.enable) {
+          return;
+        }
+        void promptServerStopped("language server stopped unexpectedly.");
+      }, 750);
+    });
+  }
+
+  applyServerStateUi("starting");
+  updateLanguageStatusForClient();
 
   async function startOrRestart(reason: string): Promise<void> {
     if (starting) {
@@ -21,8 +170,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     starting = (async () => {
       const cfg = configService.snapshot();
       if (!cfg.global.enable) {
+        stopExpected = true;
         await client?.stop();
+        stopExpected = false;
+        detachClientObservers();
         client = undefined;
+        applyServerStateUi("disabled");
+        updateLanguageStatusForClient();
+        await vscode.commands.executeCommand("setContext", "tally.serverRunning", false);
         return;
       }
 
@@ -40,21 +195,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
       if (client && client.serverKey() === resolved.key) {
         await client.sendConfiguration(settingsEnvelope);
+        updateLanguageStatusForClient(client);
         return;
       }
 
+      stopExpected = true;
       await client?.stop();
+      stopExpected = false;
+      detachClientObservers();
       client = new TallyLanguageClient({
         output,
+        traceOutput,
         server: resolved,
       });
+      attachClientObservers(client);
+      updateLanguageStatusForClient(client);
+      applyServerStateUi("starting");
+      output.appendLine(
+        `[tally] starting language server (${reason}) using ${resolved.source}: ${resolved.executablePath}`,
+      );
 
       try {
         await client.start();
         await client.sendConfiguration(settingsEnvelope);
       } catch (err) {
+        stopExpected = true;
         await client.stop();
+        stopExpected = false;
+        detachClientObservers();
         client = undefined;
+        await vscode.commands.executeCommand("setContext", "tally.serverRunning", false);
+        applyServerStateUi("stopped");
+        updateLanguageStatusForClient();
 
         const msg = err instanceof Error ? err.message : String(err);
         output.appendLine(`[tally] failed to start language server (${reason}): ${msg}`);
@@ -69,6 +241,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand("tally.restartServer", async () => {
       await startOrRestart("manual restart");
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("tally.showOutput", () => {
+      output.show(true);
+    }),
+    vscode.commands.registerCommand("tally.showLspTrace", () => {
+      traceOutput.show(true);
     }),
   );
 
@@ -170,6 +351,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export async function deactivate(): Promise<void> {
+  stopExpected = true;
   await client?.stop();
+  stopExpected = false;
   client = undefined;
+}
+
+function stateLabel(state: State): string {
+  if (state === State.Starting) {
+    return "Starting";
+  }
+  if (state === State.Running) {
+    return "Running";
+  }
+  return "Stopped";
 }
